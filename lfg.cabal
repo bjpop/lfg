@@ -27,8 +27,9 @@ Library
    build-depends:
       base > 3 && <= 5,
       haskell98,
-      array
+      array,
+      mwc-random
    exposed-modules:
-      Random.LFG
-      Random.MersenneTwister
+      Random.LFG,
+      Random.LFG.Init
    other-modules:
