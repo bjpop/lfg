@@ -1,5 +1,5 @@
 {-# LANGUAGE DeriveDataTypeable #-}
-module Random.LFG (Gen (..), generators, step, GenST, stepST, initST, Element) where
+module Random.LFG (lfg, Gen (..), generators, step, GenST, stepST, initST, Element, chunks) where
 
 import Prelude hiding (init)
 import Data.Array.ST (STUArray, newListArray)
@@ -10,14 +10,15 @@ import Data.Typeable (Typeable)
 import Control.Exception (Exception, throw)
 import Data.Array.Base (unsafeRead, unsafeWrite)
 import Random.LFG.Init as Init (randomSequence, Element)
+import System.Random.MWC (create)
 
 newtype Gen = Gen { genElements :: [Element] }
 step :: Gen -> (Element, Gen)
 step (Gen (x:xs)) = (x, Gen xs)
-step (Gen _) = error $ "generator was empty"
+step _ = error $ "generator was empty"
 
 generators :: [Gen]
-generators = map (Gen . lfg) $ chunks initK $ Init.randomSequence
+generators = map (Gen . lfg) $ chunks initK Init.randomSequence
 
 type Index = Int -- unsafe read/write require Int arguments
 type LagTable s = STUArray s Index Element
@@ -67,9 +68,9 @@ stepST :: GenST s -> S.ST s (Element, GenST s)
 stepST gen@(GenST { lagTable = array, j = oldJ, k = oldK, lagSize = size, pos = currentPos }) = do
    jth <- unsafeRead array oldJ
    kth <- unsafeRead array oldK
-   -- it is important that the sequence does not contain zero, otherwise we could
-   -- end up with an avalanche of zeros. We choose the initial sequence to avoid zero.
-   let nextElement = jth * kth
+   -- x_i = (x_j + x_k) mod 1
+   -- is there a haskell equivalent to fmod?
+   let (_, nextElement) = properFraction (jth + kth) :: (Integer, Double)
    unsafeWrite array currentPos nextElement
    let newJ = nextIndex oldJ
        newK = nextIndex oldK
@@ -83,6 +84,8 @@ genRands :: GenST s -> L.ST s [Element]
 genRands gen = do
    (next, newGen) <- strictToLazyST $ stepST gen
    ys <- genRands newGen
+   -- XXX should we force the value of next in the result?
+   -- may get thunk-leak otherwise
    return (next : ys)
 
 lfgST :: [Element] -> L.ST s [Element]
@@ -95,6 +98,5 @@ lfg seed = L.runST $ lfgST seed
 
 chunks :: Int -> [a] -> [[a]]
 chunks size xs
-   = c : chunks size rest
-   where
-   (c, rest) = splitAt size xs
+   = case splitAt size xs of
+        (c,rest) -> c : chunks size rest

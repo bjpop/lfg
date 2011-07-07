@@ -13,7 +13,9 @@ genRands :: GenST s -> L.ST s [Element]
 genRands gen = do
    next <- strictToLazyST $ uniform gen
    ys <- genRands gen
-   return (next : ys)
+   -- Must force the eval of next, otherwise we could end up with
+   -- a thunk-leak in the output list
+   return (seq next (next : ys))
 
 randomSequence :: [Element]
 randomSequence = L.runST (genRands =<< strictToLazyST MWC.create)
