@@ -2,7 +2,7 @@
 
 module Main where
 
-import Random.LFG (streams)
+import Random.LFG (generators, Gen, step)
 import Data.Char (isDigit)
 import System (exitFailure)
 import IO (hFlush, stdout)
@@ -10,7 +10,12 @@ import IO (hFlush, stdout)
 main = do
     nthRandom <- getInt "Which position in the random sequence? "
     nGens <- getInt "How many generators? "
-    mapM_ print $ take nGens $ map (head . drop nthRandom) streams
+    let gens = take nGens generators
+    mapM_ (print . genNth nthRandom) gens
+
+genNth :: Int -> Gen -> Double
+genNth 1 gen = fst $ step gen
+genNth n gen = genNth (n-1) $ snd $ step gen
 
 getInt :: String -> IO Int
 getInt message = do
