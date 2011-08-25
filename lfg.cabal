@@ -1,5 +1,5 @@
 name:                lfg
-version:             0.0.1
+version:             0.0.2
 cabal-version:       >= 1.6
 synopsis:            Lagged Fibonacci pseudo random number generator
 description:         Write long description here
@@ -12,7 +12,7 @@ maintainer:          florbitous@gmail.com
 homepage:            http://github.com/bjpop/lfg
 build-type:          Simple
 stability:           experimental
-tested-with:         GHC==7.0.2
+tested-with:         GHC==7.0.3
 extra-source-files:  README.txt
 
 source-repository head
