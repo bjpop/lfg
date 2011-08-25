@@ -1,5 +1,53 @@
 {-# LANGUAGE DeriveDataTypeable #-}
-module Random.LFG (lfg, Gen (..), generators, step, GenST, stepST, initST, Element, chunks) where
+-- | This library implements a Lagged (Additive) Fibonacci Generator,
+-- yielding psuedo random sequences of Double precision numbers in the
+-- range [0,1).
+--
+-- An individual sequence is produced by a generator, represented by the
+-- "Gen" type. A single generator can be used to produce an infinite, but
+-- periodic sequence of numbers. The period should be sufficiently large
+-- for most practical purposes.
+--
+-- An infinite, but periodic, list of generators is provided by the
+-- "generators" constant. If you need 100 generators then use:
+--
+-- > gens = take 100 generators
+--
+-- Each generator should be different (up until the full cycle of generators
+-- is exhausted).
+--
+-- The next value in a sequence can be obtained by applying the "step"
+-- function to a generator:
+--
+-- > (nextVal, nextGen) = step gen
+--
+-- The result is the next value in the sequence and a new generator.
+--
+-- Here is a program which prints the 1000000th number from 100 different generators:
+--
+-- >import Random.LFG (Gen, generators, step)
+-- >main = do
+-- >   let gens = take 100 generators
+-- >   mapM_ (print . genNth 1000000) gens
+-- >
+-- >genNth :: Int -> Gen -> Double
+-- >genNth 1 gen = fst $ step gen
+-- >genNth n gen = genNth (n-1) $ snd $ step gen
+
+module Random.LFG
+   ( -- * Purely functional interface
+     Gen (..)
+   , generators
+   , step
+   , lfg
+   , Element
+     -- * Imperative interface
+   , GenST
+   , stepST
+   , initST
+     -- * utilities
+   , chunks
+   ) where
 
 import Prelude hiding (init)
 import Data.Array.ST (STUArray, newListArray)
@@ -10,13 +58,21 @@ import Data.Typeable (Typeable)
 import Control.Exception (Exception, throw)
 import Data.Array.Base (unsafeRead, unsafeWrite)
 import Random.LFG.Init as Init (randomSequence, Element)
-import System.Random.MWC (create)
 
+-- | A generator of an infinite (but periodic) sequence of pseudo random numbers.
 newtype Gen = Gen { genElements :: [Element] }
+
+-- | A step function on generators. Given a generator @step@ will yield the next
+-- number in the sequence and a new generator. The new generator can be used to
+-- produce the next-next number in the sequence and so forth.
 step :: Gen -> (Element, Gen)
 step (Gen (x:xs)) = (x, Gen xs)
+-- this should never happen.
 step _ = error $ "generator was empty"
 
+-- | An infinite (but periodic) sequence of generators. Up until the limits
+-- of the period, each generator should produce a different pseudo random
+-- sequence of numbers.
 generators :: [Gen]
 generators = map (Gen . lfg) $ chunks initK Init.randomSequence
 
