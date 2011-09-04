@@ -1,5 +1,5 @@
 name:                lfg
-version:             0.0.2
+version:             0.0.3
 cabal-version:       >= 1.6
 synopsis:            Lagged Fibonacci pseudo random number generator
 description:         Write long description here
