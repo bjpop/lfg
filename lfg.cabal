@@ -26,10 +26,8 @@ Library
       src
    build-depends:
       base > 3 && <= 5,
-      haskell98,
-      array,
-      mwc-random
+      primitive,
+      vector
    exposed-modules:
-      Random.LFG,
-      Random.LFG.Init
+      System.Random.LFG
    other-modules:
