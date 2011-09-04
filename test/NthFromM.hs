@@ -2,20 +2,23 @@
 
 module Main where
 
-import Random.LFG (generators, Gen, step)
+import System.Random.LFG.Pure (sequences)
+import System.Random.LFG as LFG (defaultLags, largeLag)
+import System.Random.MWC as MWC (create, uniform)
+import Control.Monad (replicateM)
 import Data.Char (isDigit)
 import System (exitFailure)
 import IO (hFlush, stdout)
+import Data.Word (Word32)
 
 main = do
     nthRandom <- getInt "Which position in the random sequence? "
     nGens <- getInt "How many generators? "
-    let gens = take nGens generators
-    mapM_ (print . genNth nthRandom) gens
-
-genNth :: Int -> Gen -> Double
-genNth 1 gen = fst $ step gen
-genNth n gen = genNth (n-1) $ snd $ step gen
+    mwc <- MWC.create
+    let lags = LFG.defaultLags
+    initials <- replicateM (nGens * largeLag lags) (MWC.uniform mwc)
+    let seqs = take nGens $ sequences lags initials
+    mapM_ (print . (!! (nthRandom - 1))) seqs
 
 getInt :: String -> IO Int
 getInt message = do

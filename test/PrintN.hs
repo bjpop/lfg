@@ -2,19 +2,22 @@
 
 module Main where
 
-import Random.LFG (generators, Gen, step)
+import System.Random.LFG.Pure (sequences)
+import System.Random.LFG as LFG (defaultLags, largeLag)
+import System.Random.MWC as MWC (create, uniform)
+import Control.Monad (replicateM)
 import Data.Char (isDigit)
 import System (exitFailure)
 import IO (hFlush, stdout)
+import Data.Word (Word32)
 
 main = do
     n <- getInt "How many numbers to print? "
-    mapM_ print $ take n $ mkStream $ head generators
-
-mkStream :: Gen -> [Double]
-mkStream gen = nextVal : mkStream nextGen
-   where
-   (nextVal, nextGen) = step gen
+    mwc <- MWC.create
+    let lags = LFG.defaultLags
+    initials <- replicateM (largeLag lags) (MWC.uniform mwc)
+    let seq = head $ sequences lags initials
+    mapM_ print $ take n seq
 
 getInt :: String -> IO Int
 getInt message = do
