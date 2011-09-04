@@ -27,7 +27,6 @@ import Data.Int (Int8, Int16, Int32, Int64)
 import Data.Bits (Bits, (.&.), (.|.), shiftL)
 
 -- | A generator of an infinite (but periodic) sequence of pseudo random numbers.
--- newtype Gen = Gen { genElements :: [Element] }
 data Gen s =
    Gen { gen_table :: M.MVector s Word32
        , gen_j :: Int
