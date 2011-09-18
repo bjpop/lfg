@@ -3,19 +3,20 @@
 -- | This library implements a Lagged (Additive) Fibonacci Generator.
 
 module System.Random.LFG
-   (
-     Variate (..)
-   , Gen
+   ( -- Variate (..)
+     Gen
    , GenIO
    , GenST
-   , Lags (smallLag, largeLag)
-   , defaultLags
-   , create
+   -- , Lags (smallLag, largeLag)
+   -- , defaultLags
+   -- , create
      -- * utilities
    , chunks
+   , getRnInt
+   , initRng
    ) where
 
-import Control.Monad (ap, liftM, when)
+import Control.Monad (ap, liftM, when, forM_, replicateM_)
 import Data.Typeable (Typeable)
 import Control.Exception (Exception, throw)
 import Data.Word (Word, Word8, Word16, Word32, Word64)
@@ -24,13 +25,303 @@ import qualified Data.Vector.Unboxed.Mutable as M
 import Control.Monad.Primitive (PrimMonad, PrimState)
 import Control.Monad.ST (ST)
 import Data.Int (Int8, Int16, Int32, Int64)
-import Data.Bits (Bits, (.&.), (.|.), shiftL)
+import Data.Bits (Bits, (.&.), (.|.), shiftL, shiftR, xor, complement)
+import System.IO (hPutStrLn, stderr)
+
+debug :: String -> IO ()
+debug = hPutStrLn stderr
+-- debug _ = return ()
+
+type Word32Vec m  = M.MVector (PrimState m) Word32
+
+-- BITS_IN_INT_GEN is the log_2 of the modulus of the generator
+-- for portability this is set to 32, but can be modified;
+-- if modified, make sure INT_MOD_MASK can still be calculated
+bitsInIntGen :: Int
+bitsInIntGen = 32
+
+-- INT_MOD_MASK is used to perform modular arithmetic - specifying
+-- this value compensates for different sized words on
+-- different architectures
+intModMask :: Word32
+intModMask = 0xffffffff
+
+-- FLT_MULT is used in converting to float and double values
+fltMult :: Double
+fltMult = 0.5 / fromInteger (1 `shiftL` 31)
+
+-- INT_MASK is used to mask out the part of the generator which
+-- is not in the canonical form; it should be
+-- 2^{BITS_IN_INT_GEN-1}-1
+intMask :: Word32
+intMask = intModMask `shiftR` 1
+
+-- MAX_BIT_INT is the largest bit position allowed in the index
+-- of the node - it equals BITS_IN_INT_GEN - 2
+maxBitInt :: Int
+maxBitInt = bitsInIntGen - 2
+
+-- INTX2_MASK is used in calculation of the node numbers
+intX2Mask :: Word32
+intX2Mask = (1 `shiftL` maxBitInt) - 1
+
+-- RUNUP keeps certain generators from looking too similar in the
+-- first few words output
+runup :: Int
+runup = 2 * bitsInIntGen
+
+-- GS0 gives a more "random" distribution of generators when the
+-- user uses small integers as seeds
+gs0 :: Word32
+gs0 = 0x372f05ac
+
+toomany :: String
+toomany = "generator has branched maximum number of times;\nindependence of generators no longer guaranteed"
+
+maxStreams :: Word32
+maxStreams = 0x7fffffff
+
+data Vstruct =
+   Vstruct
+   { vstruct_l :: !Int
+   , vstruct_k :: !Int
+   , vstruct_LSBS :: !Int  -- number of least significant bits that are 1
+   , vstruct_first :: !Int -- the first seed whose LSB is 1
+   }
+
+-- XXX maybe an array or vector?
+valid :: [Vstruct]
+valid = [ Vstruct 1279 861 1 233
+        , Vstruct 17 5 1 10
+        , Vstruct 31 6 1 2
+        , Vstruct 55 24 1 11
+        , Vstruct 63 31 1 14
+        , Vstruct 127 97 1 21
+        , Vstruct 521 353 1 100
+        , Vstruct 521 168 1 83
+        , Vstruct 607 334 1 166
+        , Vstruct 607 273 1 105
+        , Vstruct 1279 418 1 208
+        ]
+
+-- count the number of 1 bits in an integer
+bitcnt :: Bits a => a -> Word32
+bitcnt x = go x 0
+   where
+   go y i
+       | y == 0 = i
+       | otherwise = go (y .&. (y - 1)) (i+1)
+
+-- the register steps according to the primitive polynomial
+-- (64,4,3,1,0); each call steps register 64 times
+-- we use two words to represent the register to allow for integer
+-- size of 32 bits
+-- advanceReg :: PrimMonad m => Word32Vec m -> m ()
+advanceReg :: Word32Vec IO -> IO ()
+advanceReg regFill = do
+   let mask = 0x1b :: Word32
+   adv64 <- M.unsafeNew 8
+   M.unsafeWrite adv64 0 0xb0000000
+   M.unsafeWrite adv64 1 0x1b
+   M.unsafeWrite adv64 2 0x60000000
+   M.unsafeWrite adv64 3 0x2d
+   M.unsafeWrite adv64 4 0xc0000000
+   M.unsafeWrite adv64 5 0x5a
+   M.unsafeWrite adv64 6 0x80000000
+   M.unsafeWrite adv64 7 0xaf
+   newFill <- M.unsafeNew 2
+   M.unsafeWrite newFill 0 0
+   M.unsafeWrite newFill 1 0
+   let loop1 i temp
+          | i < 0 = return ()
+          | otherwise = do
+               regFill0 <- M.unsafeRead regFill 0
+               let twiddle y x = (x `shiftL` 1) .|. (1 .&. (bitcnt (y .&. temp)))
+               _ <- modify newFill 0 $ twiddle regFill0
+               regFill1 <- M.unsafeRead regFill 1
+               _ <- modify newFill 1 $ twiddle regFill1
+               loop1 (i - 1) (temp `shiftR` 1)
+   loop1 (27::Int) (mask `shiftL` 27)
+   let loop2 i
+          | i >= 32 = return ()
+          | otherwise = do
+               regFill0 <- M.unsafeRead regFill 0
+               let temp = bitcnt (regFill0 .&. (mask `shiftL` i))
+               regFill1 <- M.unsafeRead regFill 1
+               let temp' = temp `xor` (bitcnt (regFill1 .&. (mask `shiftR` (32 - i))))
+               let twiddle y x = (x .|. ((1 .&. y) `shiftL` i))
+               _ <- modify newFill 0 $ twiddle temp'
+               adv64val0 <- M.unsafeRead adv64 ((i - 28) * 2)
+               let temp = bitcnt (regFill0 .&. adv64val0)
+               adv64val1 <- M.unsafeRead adv64 (((i - 28) * 2) + 1)
+               let temp' = temp `xor` (bitcnt (regFill1 .&. adv64val1))
+               _ <- modify newFill 1 $ twiddle temp'
+               loop2 (i + 1)
+   loop2 28
+   newFill0 <- M.unsafeRead newFill 0
+   M.unsafeWrite regFill 0 newFill0
+   newFill1 <- M.unsafeRead newFill 1
+   M.unsafeWrite regFill 1 newFill1
+
+-- getFill :: PrimMonad m => Word32Vec m -> Word32Vec m -> Int -> Word32 -> m ()
+getFill :: Word32Vec IO -> Word32Vec IO -> Int -> Word32 -> IO ()
+getFill n r param seed = do
+   -- XXX use something better than a list for valid
+   let localVstruct = valid !! param
+       length = vstruct_l localVstruct
+   temp <- M.unsafeNew 2
+   -- initialize the shift register with the node number XORed with
+   -- the global seed
+   -- fill the shift register with two copies of this number
+   -- except when equal to zero
+   n0 <- M.unsafeRead n 0
+   let tempVal = n0 `xor` seed
+   M.unsafeWrite temp 1 tempVal
+   if tempVal == 0
+      then M.unsafeWrite temp 0 gs0
+      else M.unsafeWrite temp 0 tempVal
+   -- advance the shift register some
+   advanceReg temp
+   advanceReg temp
+   -- the first word in the generator is defined by the 31 LSBs of the
+   -- node number
+   M.unsafeWrite r 0 ((intMask .&. n0) `shiftL` 1)
+   -- the generator is filled with the lower 31 bits of the shift
+   -- register at each time, shifted up to make room for the bits
+   -- defining the canonical form; the node number is XORed into
+   -- the fill to make the generators unique
+   forM_ [1 .. length-2] $ \i -> do
+      advanceReg temp
+      temp0 <- M.unsafeRead temp 0
+      ni <- M.unsafeRead n i
+      M.unsafeWrite r i ((intMask .&. (temp0 `xor` ni)) `shiftL` 1)
+   M.unsafeWrite r (length-1) 0
+   -- the canonical form for the LSB is instituted here
+   let localStructFirst = vstruct_first localVstruct
+       k = localStructFirst + vstruct_LSBS localVstruct
+   forM_ [localStructFirst .. k - 1] $ \j ->
+      modify r j (.|. 1)
+
+-- updates index for next spawning
+-- siDouble :: PrimMonad m => Word32Vec m -> Word32Vec m -> Int -> m ()
+siDouble :: Word32Vec IO -> Word32Vec IO -> Int -> IO ()
+siDouble a b length = do
+   bLengthMinus2 <- M.unsafeRead b (length - 2)
+   when ((bLengthMinus2 .&. (1 `shiftL` maxBitInt)) /= 0) $ do
+      -- XXX this should raise a proper exception
+      error ("Warning: siDouble " ++ toomany)
+   M.unsafeWrite a (length - 2) ((intX2Mask .&. bLengthMinus2) `shiftL` 1)
+   let initi = length - 3
+   forM_ [initi, initi - 1 .. 0] $ \i -> do
+      bi <- M.unsafeRead b i
+      when ((bi .&. (1 `shiftL` maxBitInt)) /= 0) $
+         modify a (i + 1) (+1) >> return ()
+      M.unsafeWrite a i ((intX2Mask .&. bi) `shiftL` 1)
+
+-- getRnInt :: PrimMonad m => Gen (PrimState m) -> m Word32
+getRnInt :: Gen (PrimState IO) -> IO Word32
+getRnInt gen = do
+   let r0Local = gen_r0 gen
+       r1Local = gen_r1 gen
+       kv = gen_k gen
+       lv = gen_l gen
+   hptrWord32 <- M.unsafeRead r0Local lv
+   let hptr = fromIntegral hptrWord32
+   let lptr = wrapOver (hptr + kv) lv
+   (newr0hptr, newr1hptr) <- addPrev hptr lptr r0Local r1Local
+   let newVal = (newr1hptr .&. complement 1) `xor` (newr0hptr `shiftR` 1)
+   let hptrMinus1 = wrapUnder (hptr - 1) lv
+   _ <- addPrev hptrMinus1 (wrapUnder (lptr - 1) lv) r0Local r1Local
+   M.unsafeWrite r0Local kv (fromIntegral (wrapUnder (hptrMinus1 - 1) lv))
+   return (newVal `shiftR` 1)
+   where
+   -- addPrev :: PrimMonad m => Int -> Int -> Word32Vec m -> Word32Vec m -> m (Word32, Word32)
+   addPrev :: Int -> Int -> Word32Vec IO -> Word32Vec IO -> IO (Word32, Word32)
+   addPrev hptr lptr r0 r1 = do
+      -- INT_MOD_MASK causes arithmetic to be modular when integer size is
+      -- different from generator modulus
+      r0lptr <- M.unsafeRead r0 lptr
+      newr0hptr <- modify r0 hptr $ \x -> intModMask .&. (x + r0lptr)
+      r1lptr <- M.unsafeRead r1 lptr
+      newr1hptr <- modify r1 hptr $ \x -> intModMask .&. (x + r1lptr)
+      return (newr0hptr, newr1hptr)
+   wrapOver :: Int -> Int -> Int
+   wrapOver x lv
+      | x >= lv = x - lv
+      | otherwise = x
+   wrapUnder :: Int -> Int -> Int
+   wrapUnder x lv
+      | x < 0 = lv - 1
+      | otherwise = x
+
+-- initialize :: PrimMonad m => Int -> Word32 -> Word32Vec m -> Word32 -> m (Gen (PrimState m))
+initialize :: Int -> Word32 -> Word32Vec IO -> Word32 -> IO (Gen (PrimState IO))
+initialize param seed nstart _initSeed = do
+   let localVstruct = valid !! fromIntegral param
+       length = vstruct_l localVstruct
+   r0Vec <- M.unsafeNew (length + 1) -- extra element to store the hptr
+   r1Vec <- M.unsafeNew length
+   siVec <- M.unsafeNew (length - 1)
+   let hptr = fromIntegral (length - 1)
+   M.unsafeWrite r0Vec length hptr -- store hptr in the last element of r0
+   -- XXX We don't set the stream_number yet, needed for spawning I suppose.
+   -- q[0]->stream_number = nstart_local[0];
+   siDouble siVec nstart length
+   getFill siVec r0Vec param seed
+   modify siVec 0 (+1)
+   getFill siVec r1Vec param seed
+   let gen = Gen { gen_r0 = r0Vec
+                 , gen_r1 = r1Vec
+                 , gen_si = siVec
+                 , gen_k = vstruct_k localVstruct
+                 , gen_l = length
+                 }
+   let outerLoop i
+          | i >= 0 = do
+               let innerLoop j
+                      | j < (length - 1) = do
+                           siJ <- M.unsafeRead (gen_si gen) j
+                           if siJ /= 0
+                              then return True
+                              else innerLoop (j+1)
+                      | otherwise = return False
+               k <- innerLoop 1
+               if k
+                  then do
+                     replicateM_ (length * runup) (getRnInt gen)
+                     outerLoop (i - 1)
+                else
+                   return i
+          | otherwise = return i
+   i <- outerLoop 0
+   forM_ [i, i-1 .. 0] $ \i -> do
+      replicateM_ (4 * length) (getRnInt gen)
+   return gen
+
+-- initRng :: PrimMonad m => Int -> Int -> Word32 -> Int -> m (Gen (PrimState m))
+initRng :: Int -> Int -> Word32 -> Int -> IO (Gen (PrimState IO))
+initRng {- gen -} g {- total gen -} _tg {- seed -} s {- parameter -} pa = do
+   -- some error checking needs to go here
+   -- Only 31 LSB of seed considered
+   let seedMasked = s .&. 0x7fffffff
+       localVstruct = valid !! fromIntegral pa
+       length = vstruct_l localVstruct
+   nstart <- M.unsafeNew (length - 1)
+   M.unsafeWrite nstart 0 ((fromIntegral g) :: Word32)
+   forM_ [1 .. length-2] $ \i ->
+      M.unsafeWrite nstart i 0
+   g <- initialize pa (seedMasked `xor` gs0) nstart seedMasked
+   return g
 
 -- | A generator of an infinite (but periodic) sequence of pseudo random numbers.
 data Gen s =
-   Gen { gen_table :: M.MVector s Word32
-       , gen_j :: Int
-       , gen_k :: Int
+   Gen { -- gen_table :: M.MVector s Word32
+         gen_r0 :: M.MVector s Word32
+       , gen_r1 :: M.MVector s Word32
+       , gen_si :: M.MVector s Word32
+       , gen_k :: !Int
+       , gen_l :: !Int
+       -- , gen_param :: !Int
        }
 -- the size of the vector is K+1 elements. Elements at indices [0,K-1]
 -- constitute the values of the lagTable. The element at index K is special,
@@ -43,11 +334,13 @@ type GenIO = Gen (PrimState IO)
 type GenST s = Gen (PrimState (ST s))
 
 -- | Abstract type representing the lags of the generator.
-data Lags = Lags { smallLag :: Int, largeLag :: Int }
+-- data Lags = Lags { smallLag :: Int, largeLag :: Int }
 
 -- | default lag values: these must be carefully chosen
+{-
 defaultLags :: Lags
 defaultLags = Lags 861 1279
+-}
 
 -- | An exception type to indicate that the generator was not initialised correctly,
 -- namely that the value of J was >= K.
@@ -58,36 +351,41 @@ instance Exception LFGException
 
 -- | Create a list of psuedo random number generators, given some initial lag values, the
 -- number of generators needed, and an initial sequence of random numbers.
+{-
 create :: PrimMonad m
-           => Lags      -- ^ lag values (j, k), j < k
+           => Lags      -- ^ lag values (k, l), k < l
            -> Int       -- ^ number of generators (n)
            -> [Word32]  -- ^ initial values (length must be >= n * k)
            -> m [Gen (PrimState m)]
 create lags n is =
    mapM (createOne lags) $ take n $ chunks (largeLag lags) is
+-}
 
 -- | Initialise a LFG using the small lag, large lag and a finite list of
 -- seed elements (these should be "random"), ie use another random
 -- number generator to make them. The input list of random numbers must
 -- have length >= K, the size of the lag table.
+{-
 createOne :: PrimMonad m => Lags -> [Word32] -> m (Gen (PrimState m))
 createOne lags is = do
-   let j = smallLag lags
-       k = largeLag lags
+   let k = smallLag lags
+       l = largeLag lags
    -- check that the lags are appropriate
-   when (j >= k) $ throw $ InitLagException "small lag was >= large lag"
+   when (k >= l) $ throw $ InitLagException "small lag was >= large lag"
    -- check that enough initial values have been provided
-   when (length is < k) $ throw insufficientInitials
+   when (length is < l) $ throw insufficientInitials
    -- initialise a new lag table from the input elements
-   vector <- M.unsafeNew k
+   vector <- M.unsafeNew l
    -- copy initial elements into the table
-   fill vector is k
+   fill vector is l
    -- set the cursor to index 1 (the cursor lies at position k in the table)
-   M.unsafeWrite vector k 1
+   M.unsafeWrite vector l 1
    -- return the initial state of the generator
    return $ Gen { gen_table = vector
-                , gen_j = j
                 , gen_k = k
+                , gen_l = l
+                , gen_r0 = undefined
+                , gen_r1 = undefined
                 }
    where
    -- copy elements from list to vector
@@ -105,36 +403,39 @@ createOne lags is = do
            fill vector xs (n-1)
    insufficientInitials =
       InitLagException "insufficient number of initial values (less than large lag)"
+-}
 
 -- | Advance the generator by one step, yielding the next value in the sequence.
+{-
 {-# INLINE uniformWord32 #-}
 uniformWord32 :: PrimMonad m => Gen (PrimState m) -> m Word32
-uniformWord32 (Gen { gen_table = table, gen_j = j, gen_k = k }) = do
+uniformWord32 (Gen { gen_table = table, gen_k = k, gen_l = l }) = do
    -- read the value of the cursor.
-   currentIndexWord <- M.unsafeRead table k
+   currentIndexWord <- M.unsafeRead table l
    -- convert the cursor to Int, the vector type has Int indices, but our table stores Word32s.
    let currentIndex = fromIntegral currentIndexWord
-   -- locate the jth and kth values in the table as offsets from the cursor.
-   jth <- M.unsafeRead table (wrapIndex (currentIndex + j))
+   -- locate the kth and lth values in the table as offsets from the cursor.
    kth <- M.unsafeRead table (wrapIndex (currentIndex + k))
-   -- compute the next element from: x_i = (x_j + x_k) mod (2^32)
+   lth <- M.unsafeRead table (wrapIndex (currentIndex + l))
+   -- compute the next element from: x_i = (x_k + x_l) mod (2^32)
    -- the natural modular arithmetic of Word32 will wrap around.
-   let nextElement = jth + kth
+   let nextElement = kth + lth
    -- overwrite the value at the cursor with the new element.
    M.unsafeWrite table currentIndex nextElement
    -- increment the cursor, and wrap if necessary.
-   M.unsafeWrite table k $ fromIntegral $ nextIndex currentIndex
+   M.unsafeWrite table l $ fromIntegral $ nextIndex currentIndex
    -- return the next element in the sequence.
    return nextElement
    where
    -- increment an index and wrap to zero if we reach the end of the table.
    nextIndex :: Int -> Int
-   nextIndex i = if i == k - 1 then 0 else i + 1
+   nextIndex i = if i == l - 1 then 0 else i + 1
    -- wrap an index around the end of the table, much faster than using mod.
    wrapIndex :: Int -> Int
    wrapIndex index
-      | index >= k = index - k
+      | index >= l = index - l
       | otherwise = index
+-}
 
 -- | Split a list into chunks lazily, will be _|_ if the list is insufficiently long.
 chunks :: Int -> [a] -> [[a]]
@@ -147,6 +448,7 @@ chunks size xs
 -- copyright 2009, 2010, 2011 to Bryan O'Sullivan, and released under the BSD3
 -- license.
 
+{-
 -- | Yield a random value, by transforming just one Word32 value.
 uniform1 :: PrimMonad m => (Word32 -> a) -> Gen (PrimState m) -> m a
 uniform1 f gen = do
@@ -373,3 +675,12 @@ uniformRange (x1,x2) g
   | otherwise                        = do x <- unsignedRange (sub x2 x1 + 1) (uniform g)
                                           return $! add x1 x
 {-# INLINE uniformRange #-}
+-}
+
+{-# INLINE modify #-}
+modify :: (M.Unbox a, PrimMonad m) => M.MVector (PrimState m) a -> Int -> (a -> a) -> m a
+modify vec i f = do
+   old <- M.unsafeRead vec i
+   let new = f old
+   M.unsafeWrite vec i new
+   return new

@@ -29,6 +29,6 @@ Library
       primitive,
       vector
    exposed-modules:
-      System.Random.LFG,
-      System.Random.LFG.Pure
+      System.Random.LFG
+      -- System.Random.LFG.Pure
    other-modules:
