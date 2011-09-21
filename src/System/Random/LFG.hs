@@ -232,7 +232,7 @@ getRnInt gen = do
    let newVal = (newr1hptr .&. complement 1) `xor` (newr0hptr `shiftR` 1)
    let hptrMinus1 = wrapUnder (hptr - 1) lv
    _ <- addPrev hptrMinus1 (wrapUnder (lptr - 1) lv) r0Local r1Local
-   M.unsafeWrite r0Local kv (fromIntegral (wrapUnder (hptrMinus1 - 1) lv))
+   M.unsafeWrite r0Local lv (fromIntegral (wrapUnder (hptrMinus1 - 1) lv))
    return (newVal `shiftR` 1)
    where
    -- addPrev :: PrimMonad m => Int -> Int -> Word32Vec m -> Word32Vec m -> m (Word32, Word32)
