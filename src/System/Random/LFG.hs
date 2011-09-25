@@ -8,11 +8,12 @@ module System.Random.LFG
    , GenIO
    , GenST
    , initRng
+   , spawnRng
    ) where
 
 import Control.Monad (ap, liftM, when, forM_, replicateM_)
 import Data.Typeable (Typeable)
-import Control.Exception (Exception, throw)
+import Control.Exception (Exception)
 import Data.Word (Word, Word8, Word16, Word32, Word64)
 import qualified Data.Vector.Unboxed.Mutable as M
    (unsafeRead, unsafeWrite, unsafeNew, MVector, Unbox)
@@ -20,7 +21,7 @@ import Control.Monad.Primitive (PrimMonad, PrimState)
 import Control.Monad.ST (ST)
 import Data.Int (Int8, Int16, Int32, Int64)
 import Data.Bits (Bits, (.&.), (.|.), shiftL, shiftR, xor, complement)
-import System.IO (hPutStrLn, stderr)
+import Data.Primitive.Array (MutableArray, newArray, readArray, writeArray)
 
 type Word32Vec m  = M.MVector (PrimState m) Word32
 
@@ -68,8 +69,8 @@ gs0 = 0x372f05ac
 toomany :: String
 toomany = "generator has branched maximum number of times;\nindependence of generators no longer guaranteed"
 
-maxStreams :: Word32
-maxStreams = 0x7fffffff
+-- maxStreams :: Word32
+-- maxStreams = 0x7fffffff
 
 data Vstruct =
    Vstruct
@@ -299,33 +300,88 @@ getRnInt gen = do
       | otherwise = x
 -}
 
-initialize :: PrimMonad m => Int -> Word32 -> Word32Vec m -> Word32 -> m (Gen (PrimState m))
+-- initialize :: PrimMonad m => Int -> Int -> Word32 -> Word32Vec m -> Word32 -> m (Gen (PrimState m))
+initialize :: PrimMonad m => Int -> Int -> Word32 -> Word32Vec m -> Word32 -> m (MutableArray (PrimState m) (Gen (PrimState m)))
 -- initialize :: Int -> Word32 -> Word32Vec IO -> Word32 -> IO (Gen (PrimState IO))
-initialize param seed nstart _initSeed = do
+initialize ngen param seed nstart initSeed = do
    let localVstruct = valid !! fromIntegral param
        length = vstruct_l localVstruct
-   r0Vec <- M.unsafeNew (length + 1) -- extra element to store the hptr
-   r1Vec <- M.unsafeNew length
-   siVec <- M.unsafeNew (length - 1)
-   let hptr = fromIntegral (length - 1)
-   M.unsafeWrite r0Vec length hptr -- store hptr in the last element of r0
-   -- XXX We don't set the stream_number yet, needed for spawning I suppose.
-   -- q[0]->stream_number = nstart_local[0];
-   siDouble siVec nstart length
-   getFill siVec r0Vec param seed
-   modify siVec 0 (+1)
-   getFill siVec r1Vec param seed
-   let gen = Gen { gen_r0 = r0Vec
-                 , gen_r1 = r1Vec
-                 , gen_si = siVec
-                 , gen_k = vstruct_k localVstruct
-                 , gen_l = length
-                 }
+   order <- M.unsafeNew ngen
+   q <- newArray ngen undefined
+   -- for (i=0;i<ngen_local;i++)
+   forM_ [0 .. ngen - 1] $ \i -> do
+       r0Vec <- M.unsafeNew (length + 1) -- extra element to store the hptr
+       r1Vec <- M.unsafeNew length
+       siVec <- M.unsafeNew (length - 1)
+       let hptr = fromIntegral (length - 1)
+       M.unsafeWrite r0Vec length hptr -- store hptr in the last element of r0
+       nstart0 <- M.unsafeRead nstart 0
+       let gen = Gen { gen_r0 = r0Vec
+                     , gen_r1 = r1Vec
+                     , gen_si = siVec
+                     , gen_k = vstruct_k localVstruct
+                     , gen_l = length
+                     , gen_streamNumber = fromIntegral nstart0 -- This will be updated for gens at pos > 0
+                     , gen_param = param
+                     , gen_seed = seed
+                     , gen_initSeed = initSeed
+                     }
+       writeArray q i gen
+   q0 <- readArray q 0
+   let q0_si = gen_si q0
+       q0_r0 = gen_r0 q0
+       q0_r1 = gen_r1 q0
+   siDouble q0_si nstart length
+   getFill q0_si q0_r0 param seed
+   _ <- modify q0_si 0 (+1)
+   getFill q0_si q0_r1 param seed
+   M.unsafeWrite order 0 (0::Int)
+   when (ngen > 1) $ do
+       -- while(1)
+       let whileLoop i = do
+               let l = i
+               -- for (k=0;k<l;k++)
+               let forLoop i k
+                      | k < l = do
+                           orderk <- M.unsafeRead order k
+                           qorderk <- readArray q orderk
+                           let nindex = gen_si qorderk
+                           qi <- readArray q i
+                           nindex0 <- M.unsafeRead nindex 0
+                           writeArray q i (qi { gen_streamNumber = fromIntegral nindex0 })
+                           siDouble nindex nindex length
+                           let qi_si = gen_si qi
+                           -- for (j=0;j<length-1;j++)
+                           forM_ [0..length-2] $ \j -> do
+                               nindexj <- M.unsafeRead nindex j
+                               M.unsafeWrite qi_si j nindexj
+                           getFill qi_si (gen_r0 qi) param seed
+                           _ <- modify qi_si 0 (+1)
+                           getFill qi_si (gen_r1 qi) param seed
+                           let next_i = i + 1
+                           if (ngen == next_i)
+                              then return next_i
+                              else forLoop next_i (k + 1)
+                      | otherwise = return i
+               next_i <- forLoop i 0
+               if (ngen == next_i)
+                  then return ()
+                  else do
+                     -- for (k=l-1;k>0;k--)
+                     forM_ [l-1,l-2 .. 1] $ \k -> do
+                        M.unsafeWrite order (2*k+1) (l+k)
+                        orderk <- M.unsafeRead order k
+                        M.unsafeWrite order (2*k) orderk
+                     M.unsafeWrite order 1 l
+                     whileLoop next_i
+       whileLoop 1
+   -- for (i=ngen_local-1;i>=0;i--)
    let outerLoop i
           | i >= 0 = do
+               -- for (j=1;j<lv-1;j++)
                let innerLoop j
                       | j < (length - 1) = do
-                           siJ <- M.unsafeRead (gen_si gen) j
+                           siJ <- M.unsafeRead (gen_si q0) j
                            if siJ /= 0
                               then return True
                               else innerLoop (j+1)
@@ -333,19 +389,23 @@ initialize param seed nstart _initSeed = do
                k <- innerLoop 1
                if k
                   then do
-                     replicateM_ (length * runup) (getRnWord32 gen)
+                     -- for (j=0;j<length*RUNUP;j++)
+                     replicateM_ (length * runup) (getRnWord32 q0)
                      outerLoop (i - 1)
                 else
                    return i
           | otherwise = return i
-   i <- outerLoop 0
+   i <- outerLoop (ngen - 1)
+   -- while (i>=0)
    forM_ [i, i-1 .. 0] $ \i -> do
-      replicateM_ (4 * length) (getRnWord32 gen)
-   return gen
+      -- for (j=0;j<4*length;j++)
+      qi <- readArray q i
+      replicateM_ (4 * length) (getRnWord32 qi)
+   return q
 
 initRng :: PrimMonad m => Int -> Int -> Word32 -> Int -> m (Gen (PrimState m))
 -- initRng :: Int -> Int -> Word32 -> Int -> IO (Gen (PrimState IO))
-initRng {- gen -} g {- total gen -} _tg {- seed -} s {- parameter -} pa = do
+initRng {- gen -} g {- total gen -} tg {- seed -} s {- parameter -} pa = do
    -- some error checking needs to go here
    -- Only 31 LSB of seed considered
    let seedMasked = s .&. 0x7fffffff
@@ -355,8 +415,34 @@ initRng {- gen -} g {- total gen -} _tg {- seed -} s {- parameter -} pa = do
    M.unsafeWrite nstart 0 ((fromIntegral g) :: Word32)
    forM_ [1 .. length-2] $ \i ->
       M.unsafeWrite nstart i 0
-   g <- initialize pa (seedMasked `xor` gs0) nstart seedMasked
-   return g
+   p <- initialize 1 pa (seedMasked `xor` gs0) nstart seedMasked
+   p0 <- readArray p 0
+   writeArray p 0 (p0 { gen_streamNumber = g })
+   let siLocal = gen_si p0
+   let whileLoop = do
+          siLocal0 <- M.unsafeRead siLocal 0
+          siLocal1 <- M.unsafeRead siLocal 1
+          if (siLocal0 < fromIntegral tg && siLocal1 /= 0)
+             then do
+                siDouble siLocal siLocal length
+                whileLoop
+             else return ()
+   whileLoop
+   readArray p 0
+
+spawnRng :: PrimMonad m => Gen (PrimState m) -> Int -> m [Gen (PrimState m)]
+spawnRng gen nspawned = do
+   let p = gen_si gen
+   q <- initialize nspawned (gen_param gen) (gen_seed gen) p (gen_initSeed gen)
+   let lval = gen_l gen
+   siDouble p p lval
+   buildList q 0 nspawned []
+   where
+   buildList array index size acc
+      | index >= size = return $ reverse acc
+      | otherwise = do
+           next <- readArray array index
+           buildList array (index+1) size (next:acc)
 
 -- | A generator of an infinite (but periodic) sequence of pseudo random numbers.
 data Gen s =
@@ -365,6 +451,10 @@ data Gen s =
        , gen_si :: M.MVector s Word32
        , gen_k :: !Int
        , gen_l :: !Int
+       , gen_streamNumber :: !Int
+       , gen_param :: !Int
+       , gen_seed :: !Word32
+       , gen_initSeed :: !Word32
        }
 -- the size of the vector is K+1 elements. Elements at indices [0,K-1]
 -- constitute the values of the lagTable. The element at index K is special,
@@ -389,6 +479,7 @@ instance Exception LFGException
 -- license.
 
 -- | Yield a random value, by transforming just one Word32 value.
+{-
 uniform1 :: PrimMonad m => (Word32 -> a) -> Gen (PrimState m) -> m a
 uniform1 f gen = do
   (w1, _w2) <- getNextElements gen
@@ -401,6 +492,7 @@ uniform2 f gen = do
    (w1, w2) <- getNextElements gen
    return $! f w1 w2
 {-# INLINE uniform2 #-}
+-}
 
 -- | The class of types for which we can generate uniformly
 -- distributed random variates.
@@ -559,10 +651,12 @@ instance (Variate a, Variate b, Variate c, Variate d) => Variate (a,b,c,d) where
     {-# INLINE uniform  #-}
     {-# INLINE uniformR #-}
 
+{-
 wordsTo64Bit :: (Integral a) => Word32 -> Word32 -> a
 wordsTo64Bit x y =
     fromIntegral ((fromIntegral x `shiftL` 32) .|. fromIntegral y :: Word64)
 {-# INLINE wordsTo64Bit #-}
+-}
 
 wordToBool :: Word32 -> Bool
 wordToBool i = (i .&. 1) /= 0
