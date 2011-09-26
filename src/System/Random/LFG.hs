@@ -378,10 +378,11 @@ initialize ngen param seed nstart initSeed = do
    -- for (i=ngen_local-1;i>=0;i--)
    let outerLoop i
           | i >= 0 = do
+               qi <- readArray q i
                -- for (j=1;j<lv-1;j++)
                let innerLoop j
                       | j < (length - 1) = do
-                           siJ <- M.unsafeRead (gen_si q0) j
+                           siJ <- M.unsafeRead (gen_si qi) j
                            if siJ /= 0
                               then return True
                               else innerLoop (j+1)
@@ -390,7 +391,7 @@ initialize ngen param seed nstart initSeed = do
                if k
                   then do
                      -- for (j=0;j<length*RUNUP;j++)
-                     replicateM_ (length * runup) (getRnWord32 q0)
+                     replicateM_ (length * runup) (getRnWord32 qi)
                      outerLoop (i - 1)
                 else
                    return i
@@ -398,8 +399,8 @@ initialize ngen param seed nstart initSeed = do
    i <- outerLoop (ngen - 1)
    -- while (i>=0)
    forM_ [i, i-1 .. 0] $ \i -> do
-      -- for (j=0;j<4*length;j++)
       qi <- readArray q i
+      -- for (j=0;j<4*length;j++)
       replicateM_ (4 * length) (getRnWord32 qi)
    return q
 
