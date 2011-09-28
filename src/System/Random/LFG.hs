@@ -404,6 +404,7 @@ initialize ngen param seed nstart initSeed = do
       replicateM_ (4 * length) (getRnWord32 qi)
    return q
 
+-- XXX some sanity checking of inputs needs to be done
 initRng :: PrimMonad m => Int -> Int -> Word32 -> Int -> m (Gen (PrimState m))
 -- initRng :: Int -> Int -> Word32 -> Int -> IO (Gen (PrimState IO))
 initRng {- gen -} g {- total gen -} tg {- seed -} s {- parameter -} pa = do
