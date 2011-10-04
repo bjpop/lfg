@@ -36,11 +36,14 @@ void printRandDoubles(Sprng *rng, int num)
 int main (void)
 {
    int seed = 42;
-   Sprng * gen1;
-   gen1 = SelectType(SPRNG_LFG);
-   gen1->init_sprng(0, 1, seed, 0);
-   printRandInts(gen1, 100);
-   printRandFlts(gen1, 100);
-   printRandDoubles(gen1, 100);
+   Sprng * gen0, **gens;
+   gen0 = SelectType(SPRNG_LFG);
+   gen0->init_sprng(0, 1, seed, 0);
+   gen0->spawn_sprng(2, &gens);
+   printRandInts(gen0, 100);
+   //printRandFlts(gen0, 100);
+   //printRandDoubles(gen0, 100);
+   printRandInts(gens[0], 100);
+   printRandInts(gens[1], 100);
    return 0;
 }
