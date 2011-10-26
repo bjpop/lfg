@@ -79,7 +79,7 @@ createOne lags is = do
    -- check that enough initial values have been provided
    when (length is < k) $ throw insufficientInitials
    -- initialise a new lag table from the input elements
-   vector <- M.unsafeNew k
+   vector <- M.unsafeNew (k + 1)
    -- copy initial elements into the table
    fill vector is k
    -- set the cursor to index 1 (the cursor lies at position k in the table)
@@ -101,8 +101,9 @@ createOne lags is = do
    fill vector (x:xs) n
       | n == 0 = return ()
       | otherwise = do
-           M.unsafeWrite vector n x
-           fill vector xs (n-1)
+           let n' = n - 1
+           M.unsafeWrite vector n' x
+           fill vector xs n'
    insufficientInitials =
       InitLagException "insufficient number of initial values (less than large lag)"
 
